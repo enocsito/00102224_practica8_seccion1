@@ -7,22 +7,20 @@ import pool from "./db.js";
 
 const app = express();
 const PORT = 5000;
-const JWT_SECRET = "your_jwt_secret"; 
+const JWT_SECRET = "your_jwt_secret";
 
 app.use(bodyParser.json());
 app.use(cors());
 
-const users = []; 
-
 //hashed password function
 
-const generateHashedPassword = async () => {
-  const password = "123456!";
+const generateHashedPassword = async (password = "123456!") => {
   const saltRounds = 10;
 
   const hashedPassword = await bcrypt.hash(password, saltRounds);
   console.log(`Contraseña original: ${password}`);
   console.log(`Hashed password: ${hashedPassword}`);
+  return hashedPassword;
 }
 
 
@@ -40,43 +38,42 @@ const verifyToken = (req, res, next) => {
 
 // Routes
 
-app.post("/register", async (req, res) => {
-  try {
-    const { email, password } = req.body;
-
-    const existingUser = users.find((u) => u.email === email);
-    if (existingUser) {
-      return res.status(400).json({ message: "User already exists" });
-    }
-    const hashedPassword = await bcrypt.hash(password, 10); 
-    const newUser = {
-      id: Date.now().toString(),
-      email: email,
-      password: hashedPassword,
-    };
-    users.push(newUser);
-    console.log(users); 
-    res.status(201).json({ message: "User registered successfully" });
-
-  } catch (error) {
-    res.status(500).json({ message: "Something went wrong" });
-  }
+// Home endpoint
+app.get("/", (req, res) => {
+  res.status(200).json({ message: "Welcome to the API", status: "running" });
 });
+
 
 app.post("/signin", async (req, res) => {
-  const { email, password } = req.body;
-  const user = users.find((u) => u.email === email);
-  if (!user) return res.status(404).json({ message: "User not found" });
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ message: "Email and password are required" });
+    }
+    const userResult = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
 
-  const isPasswordValid = await bcrypt.compare(password, user.password);
-  if (!isPasswordValid) return res.status(400).json({ message: "Invalid credentials" });
+    const user = userResult.rows[0];
+    const isPasswordValid = await bcrypt.compare(password, user.password);
 
-  const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: "1h" });
-  res.status(200).json({ token });
-});
+    if (!isPasswordValid) {
+      return res.status(400).json({ message: "Invalid credentials" });
+    }
 
-app.get("/protected", verifyToken, (req, res) => {
-  res.status(200).json({ message: "Protected data accessed", user: req.user });
+    const token = jwt.sign(
+      { id: user.id, email: user.email },
+      JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    res.status(200).json({ token });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Something went wrong" });
+  }
 });
 
 app.post("/api/video", verifyToken, async (req, res) => {
@@ -95,7 +92,7 @@ app.post("/api/video", verifyToken, async (req, res) => {
     };
 
     console.log("Nuevo video creado:", newVideo);
-    
+
     res.status(201).json({ message: "Video created successfully", video: newVideo });
 
   } catch (error) {
@@ -103,7 +100,7 @@ app.post("/api/video", verifyToken, async (req, res) => {
   }
 });
 
-app.get("/users", (req, res) => {
+app.get("/users", verifyToken, (req, res) => {
   pool.query('SELECT * FROM users ORDER BY id ASC', (error, results) => {
     if (error) {
       console.error(error);
@@ -113,7 +110,7 @@ app.get("/users", (req, res) => {
   });
 });
 
-app.get("/users/:id", (req, res) => {
+app.get("/users/:id", verifyToken, (req, res) => {
   const id = parseInt(req.params.id);
 
   pool.query('SELECT * FROM users WHERE id = $1', [id], (error, results) => {
@@ -124,18 +121,43 @@ app.get("/users/:id", (req, res) => {
   });
 });
 
-app.post("/users", (req, res) => {
-  const { name, email } = req.body;
+app.post("/users", async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
 
-  pool.query('INSERT INTO users (name, email) VALUES ($1, $2) RETURNING *', [name, email], (error, results) => {
-    if (error) {
-      throw error;
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: "Name, email, and password are required" });
     }
-    res.status(201).send(`User added with ID: ${results.rows[0].id}`);
-  });
+
+    const existingUserResult = await pool.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
+
+    if (existingUserResult.rows.length > 0) {
+      return res.status(400).json({ message: "User already exists" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const result = await pool.query(
+      'INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING id, name, email',
+      [name, email, hashedPassword]
+    );
+
+    console.log("Usuario creado:", result.rows[0]);
+    res.status(201).json({
+      message: "User created successfully",
+      user: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Something went wrong" });
+  }
 });
 
-app.post("/users/:id", (request, response) => {
+app.put("/users/:id", verifyToken, (request, response) => {
   const id = parseInt(request.params.id)
   const { name, email } = request.body
 
@@ -151,7 +173,7 @@ app.post("/users/:id", (request, response) => {
   )
 })
 
-app.delete("/users/:id",(request, response) => {
+app.delete("/users/:id", verifyToken, (request, response) => {
   const id = parseInt(request.params.id)
 
   pool.query('DELETE FROM users WHERE id = $1', [id], (error, results) => {
@@ -169,7 +191,7 @@ app.get("/generate-hash", async (req, res) => {
   } catch (error) {
     res.status(500).json({ message: "Error generating hash" });
   }
-}); 
+});
 
 
 
